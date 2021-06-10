@@ -7,7 +7,6 @@ package runtime
 import (
 	"internal/abi"
 	"internal/cpu"
-	"internal/goexperiment"
 	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
@@ -2443,6 +2442,14 @@ func startm(_p_ *p, spinning bool) {
 	// disable preemption before acquiring a P from pidleget below.
 	mp := acquirem()
 	lock(&sched.lock)
+	if _p_ != nil && _p_.bind {
+		if _p_.status != _Pidle {
+			unlock(&sched.lock)
+			releasem(mp)
+			return
+		}
+		atomic.Xadd(&sched.nmspinning, 1)
+	}
 	if _p_ == nil {
 		_p_ = pidleget()
 		if _p_ == nil {
@@ -2791,6 +2798,11 @@ top:
 		}
 	}
 
+	if atomic.Casint64(&bindStats[_p_.id], 1, 2) {
+		bindp := bindps[_p_.id]
+		return bindp.gp, true
+	}
+
 	// We have nothing to do.
 	//
 	// If we're in the GC mark phase, can safely scan and blacken objects,
@@ -2824,7 +2836,9 @@ top:
 	if otherReady {
 		goto top
 	}
+	goto top
 
+	//unreached
 	// Before we drop our P, make a snapshot of the allp slice,
 	// which can change underfoot once we no longer block
 	// safe-points. We don't need to snapshot the contents because
@@ -3670,6 +3684,17 @@ func goexit0(gp *g) {
 		print("invalid m->lockedInt = ", _g_.m.lockedInt, "\n")
 		throw("internal lockOSThread error")
 	}
+	if gp.isbindp {
+		pid := gp.bindpid
+		bindpg := bindps[gp.bindpid]
+		if !atomic.Casint64(&bindStats[pid], 2, 0) {
+			throw("unset bindpg invalid")
+		}
+		gp.bindpid = 0
+		gp.isbindp = false
+		NewProcBindp(bindpg.fn, bindpg.arg, bindpg.pid)
+	}
+
 	gfput(_g_.m.p.ptr(), gp)
 	if locked {
 		// The goroutine may have locked this thread because
@@ -4271,14 +4296,6 @@ func newproc(siz int32, fn *funcval) {
 //
 //go:systemstack
 func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerpc uintptr) *g {
-	if goexperiment.RegabiDefer && narg != 0 {
-		// TODO: When we commit to GOEXPERIMENT=regabidefer,
-		// rewrite the comments for newproc and newproc1.
-		// newproc will no longer have a funny stack layout or
-		// need to be nosplit.
-		throw("go with non-empty frame")
-	}
-
 	_g_ := getg()
 
 	if fn == nil {
@@ -4340,7 +4357,6 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 			}
 		}
 	}
-
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
 	newg.sched.sp = sp
 	newg.stktopsp = sp
@@ -5011,12 +5027,22 @@ func procresize(nprocs int32) *p {
 		lock(&allpLock)
 		if nprocs <= int32(cap(allp)) {
 			allp = allp[:nprocs]
+			bindps = bindps[:nprocs]
+			bindStats = bindStats[:nprocs]
 		} else {
 			nallp := make([]*p, nprocs)
 			// Copy everything up to allp's cap so we
 			// never lose old allocated Ps.
 			copy(nallp, allp[:cap(allp)])
 			allp = nallp
+
+			nbindps := make([]*bindPG, nprocs)
+			copy(nbindps, bindps[:cap(bindps)])
+			bindps = nbindps
+
+			nbindStats := make([]int64, nprocs)
+			copy(nbindStats, bindStats[:cap(bindStats)])
+			bindStats = nbindStats
 		}
 
 		if maskWords <= int32(cap(idlepMask)) {
@@ -5150,11 +5176,7 @@ func wirep(_p_ *p) {
 		throw("wirep: already in go")
 	}
 	if _p_.m != 0 || _p_.status != _Pidle {
-		id := int64(0)
-		if _p_.m != 0 {
-			id = _p_.m.ptr().id
-		}
-		print("wirep: p->m=", _p_.m, "(", id, ") p->status=", _p_.status, "\n")
+		print("wirep: p->m=", _p_.m, "(", _p_.id, ") p->status=", _p_.status, "\n")
 		throw("wirep: invalid p state")
 	}
 	_g_.m.p.set(_p_)
@@ -5249,7 +5271,7 @@ func checkdead() {
 		case _Grunnable,
 			_Grunning,
 			_Gsyscall:
-			print("runtime: checkdead: find g ", gp.goid, " in status ", s, "\n")
+			print(getg().m.p.ptr().id, "runtime: checkdead: find g ", gp.goid, " in status ", s, "\n")
 			throw("checkdead: runnable g")
 		}
 	})

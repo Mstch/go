@@ -495,6 +495,9 @@ type g struct {
 	// and check for debt in the malloc hot path. The assist ratio
 	// determines how this corresponds to scan work debt.
 	gcAssistBytes int64
+
+	isbindp bool
+	bindpid int
 }
 
 // gTrackingPeriod is the number of transitions out of _Grunning between
@@ -746,6 +749,7 @@ type p struct {
 
 	// Padding is no longer needed. False sharing is now not a worry because p is large enough
 	// that its size class is an integer multiple of the cache line size (for any of our architectures).
+	bind bool
 }
 
 type schedt struct {
