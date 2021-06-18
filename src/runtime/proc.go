@@ -2338,6 +2338,14 @@ func startm(_p_ *p, spinning bool) {
 	// disable preemption before acquiring a P from pidleget below.
 	mp := acquirem()
 	lock(&sched.lock)
+	if _p_ != nil && _p_.bind {
+		if _p_.status != _Pidle {
+			unlock(&sched.lock)
+			releasem(mp)
+			return
+		}
+		atomic.Xadd(&sched.nmspinning, 1)
+	}
 	if _p_ == nil {
 		_p_ = pidleget()
 		if _p_ == nil {
@@ -2663,6 +2671,7 @@ top:
 	// If number of spinning M's >= number of busy P's, block.
 	// This is necessary to prevent excessive CPU consumption
 	// when GOMAXPROCS>>1 but the program parallelism is low.
+	const stealTries = 4
 	if !_g_.m.spinning && 2*atomic.Load(&sched.nmspinning) >= procs-atomic.Load(&sched.npidle) {
 		goto stop
 	}
@@ -2670,7 +2679,6 @@ top:
 		_g_.m.spinning = true
 		atomic.Xadd(&sched.nmspinning, 1)
 	}
-	const stealTries = 4
 	for i := 0; i < stealTries; i++ {
 		stealTimersOrRunNextG := i == stealTries-1
 
@@ -2733,6 +2741,10 @@ top:
 
 stop:
 
+	if atomic.Cas64(&bindStats[_p_.id], BindGRunnable, BindGRunning) {
+		bindp := bindps[_p_.id]
+		return bindp.gp, true
+	}
 	// We have nothing to do. If we're in the GC mark phase, can
 	// safely scan and blacken objects, and have work to do, run
 	// idle-time marking rather than give up the P.
@@ -2770,7 +2782,7 @@ stop:
 	if otherReady {
 		goto top
 	}
-
+	goto top
 	// Before we drop our P, make a snapshot of the allp slice,
 	// which can change underfoot once we no longer block
 	// safe-points. We don't need to snapshot the contents because
@@ -3458,6 +3470,16 @@ func goexit0(gp *g) {
 	if _g_.m.lockedInt != 0 {
 		print("invalid m->lockedInt = ", _g_.m.lockedInt, "\n")
 		throw("internal lockOSThread error")
+	}
+	if gp.isbindp {
+		pid := gp.bindpid
+		bindpg := bindps[gp.bindpid]
+		if !atomic.Cas64(&bindStats[pid], BindGRunning, BindGInit) {
+			throw("unset bindpg invalid")
+		}
+		gp.bindpid = 0
+		gp.isbindp = false
+		NewProcBindp(bindpg.fn, bindpg.arg, bindpg.pid)
 	}
 	gfput(_g_.m.p.ptr(), gp)
 	if locked {
@@ -4845,12 +4867,22 @@ func procresize(nprocs int32) *p {
 		lock(&allpLock)
 		if nprocs <= int32(cap(allp)) {
 			allp = allp[:nprocs]
+			bindps = bindps[:nprocs]
+			bindStats = bindStats[:nprocs]
 		} else {
 			nallp := make([]*p, nprocs)
 			// Copy everything up to allp's cap so we
 			// never lose old allocated Ps.
 			copy(nallp, allp[:cap(allp)])
 			allp = nallp
+
+			nbindps := make([]*bindPG, nprocs)
+			copy(nbindps, bindps[:cap(bindps)])
+			bindps = nbindps
+
+			nbindStats := make([]uint64, nprocs)
+			copy(nbindStats, bindStats[:cap(bindStats)])
+			bindStats = nbindStats
 		}
 
 		if maskWords <= int32(cap(idlepMask)) {
