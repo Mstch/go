@@ -2701,7 +2701,9 @@ func execute(gp *g, inheritTime bool) {
 		}
 		traceGoStart()
 	}
-
+	if gp.isbindp {
+		gp.sched.ret = *(*uintptr)(unsafe.Pointer(gp.sched.sp + sys.PtrSize))
+	}
 	gogo(&gp.sched)
 }
 

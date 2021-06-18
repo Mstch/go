@@ -7,15 +7,13 @@ import (
 )
 
 func fuck(p unsafe.Pointer)  {
-	println(p)
+	println("fuck",p)
 	time.Sleep(3*time.Second)
 	println("done")
 }
 
 func main()	 {
 	ch := make(chan int)
-	println("main",&ch)
-	runtime.NewProcBindp(fuck,unsafe.Pointer(&ch),0)
-	runtime.NewProcBindp(fuck,unsafe.Pointer(&ch),1)
+	runtime.NewProcBindp(fuck,unsafe.Pointer(uintptr(1)),0)
 	<-ch
 }
