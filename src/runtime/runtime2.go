@@ -481,6 +481,8 @@ type g struct {
 	// and check for debt in the malloc hot path. The assist ratio
 	// determines how this corresponds to scan work debt.
 	gcAssistBytes int64
+	isbindp       bool
+	bindpid       int
 }
 
 type m struct {
@@ -716,7 +718,8 @@ type p struct {
 	// scheduler ASAP (regardless of what G is running on it).
 	preempt bool
 
-	pad cpu.CacheLinePad
+	pad  cpu.CacheLinePad
+	bind bool
 }
 
 type schedt struct {
